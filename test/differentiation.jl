@@ -13,7 +13,7 @@
     p = x^2-y+x*y
     @test differentiate(p, x, 2) == 2
     @test differentiate(p, x, 0) === p
-    @test_throws DomainError differentiate(p, x, -1)
+    @test differentiate(p, x, -1) == 0.5*x+y
     @test differentiate(x, x, 1) == 1
     #@inferred differentiate(x, x, 0) # FIXME failing at the moment
     @inferred differentiate(x, x, 1)

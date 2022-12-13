@@ -39,26 +39,7 @@ antidifferentiate(p::APL, xs) = [antidifferentiate(p, x) for x in xs]
 # antidifferentiate(p, [x, y]) with TypedPolynomials promote x to a Monomial
 antidifferentiate(p::APL, m::AbstractMonomial) = antidifferentiate(p, variable(m))
 
-# The `R` argument indicates a desired result type. We use this in order
-# to attempt to preserve type-stability even though the value of `deg` cannot
-# be known at compile time. For scalar `p` and `x`, we set R to be the type
-# of antidifferentiate(p, x) to give a stable result type regardless of `deg`. For
-# vectors p and/or x this is impossible (since antidifferentiate may return an array),
-# so we just set `R` to `Any`
-function (_antidifferentiate_recursive(p, x, deg::Int, ::Type{R})::R) where {R}
-    if deg < 0
-        throw(DomainError(deg, "degree is negative"))
-    elseif deg == 0
-        return p
-    else
-        return antidifferentiate(antidifferentiate(p, x), x, deg - 1)
-    end
-end
-
-antidifferentiate(p, x, deg::Int) = _antidifferentiate_recursive(p, x, deg, Base.promote_op(antidifferentiate, typeof(p), typeof(x)))
-antidifferentiate(p::AbstractArray, x, deg::Int) = _antidifferentiate_recursive(p, x, deg, Any)
-antidifferentiate(p, x::Union{AbstractArray,Tuple}, deg::Int) = _antidifferentiate_recursive(p, x, deg, Any)
-antidifferentiate(p::AbstractArray, x::Union{AbstractArray,Tuple}, deg::Int) = _antidifferentiate_recursive(p, x, deg, Any)
+antidifferentiate(p, x, deg::Int) = _differentiate_recursive(p, x, -deg, Base.promote_op(antidifferentiate, typeof(p), typeof(x)))
 
 
 # This is alternative, Val-based interface for nested antidifferentiation.
