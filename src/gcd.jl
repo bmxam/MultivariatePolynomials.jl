@@ -1,7 +1,8 @@
 export GeneralizedEuclideanAlgorithm
 
 _copy(p, ::MA.IsMutable) = p
-_copy(p, ::MA.IsNotMutable) = copy(p)
+# `Base.copy` does not copy anything for `BigInt` so we need `MA.copy_if_mutable`
+_copy(p, ::MA.IsNotMutable) = MA.copy_if_mutable(p)
 
 """
     abstract type AbstractUnivariateGCDAlgorithm end
@@ -64,8 +65,8 @@ end
 #function MA.promote_operation(::typeof(gcd), P::Type{<:Number}, Q::Type{<:Number})
 #    return typeof(gcd(one(P), one(Q)))
 #end
-function MA.promote_operation(::typeof(gcd), P::Type{<:APL}, Q::Type{<:APL})
-    return MA.promote_operation(pseudo_rem, P, Q)
+function MA.promote_operation(::typeof(gcd), P::Type{<:APL}, Q::Type{<:APL}, A::Type=GeneralizedEuclideanAlgorithm)
+    return MA.promote_operation(rem_or_pseudo_rem, P, Q, A)
 end
 
 """
@@ -140,41 +141,42 @@ function Base.gcd(t1::AbstractTermLike{T}, t2::AbstractTermLike{S}, algo::Abstra
     return term(_coefficient_gcd(coefficient(t1), coefficient(t2)), gcd(monomial(t1), monomial(t2)))
 end
 
+function shift_deflation(p::AbstractPolynomialLike, v::AbstractVariable)
+    shift = -1
+    defl = 0
+    for mono in monomials(p)
+        exp = degree(mono, v)
+        if shift == -1
+            shift = exp
+        elseif exp < shift
+            # There are two cases:
+            # 1) If `defl[i]` is zero then it means all previous monomials
+            #    had degree `shift[i]` so we just set `defl[i]` to
+            #    `shift[i] - exp` or equivalently `gcd(0, shift[i] - exp)`.
+            # 2) If  `defl[i]` is positive then we have some monomials with
+            #    degree `shift[i]` and some with degree
+            #    `shift[i] + k * defl[i]` for some `k > 0`. We have
+            #    `gcd(shift[i] - exp, shift[i] + k1 * defl[i] - exp, shift[i] + k2 * defl[i] - exp, ...) =`
+            #    `gcd(shift[i] - exp, k1 * defl[i], k2 * defl[i], ...)`
+            #    Since `gcd(k1, k2, ...) = 1`, this is equal to
+            #    `gcd(shift[i] - exp, defl[i])`
+            defl = gcd(defl, shift - exp)
+            shift = exp
+        else
+            defl = gcd(defl, exp - shift)
+        end
+    end
+    return shift, defl
+end
+
 # Inspired from to `AbstractAlgebra.deflation`
 function deflation(p::AbstractPolynomialLike)
     if iszero(p)
         return constantmonomial(p), constantmonomial(p)
     end
-    shift = fill(-1, nvariables(p))
-    defl = zeros(Int, nvariables(p))
-    for mono in monomials(p)
-        exps = exponents(mono)
-        for i in eachindex(exps)
-            exp = exps[i]
-            @assert exp >= 0
-            if shift[i] == -1
-                shift[i] = exp
-            elseif exp < shift[i]
-                # There are two cases:
-                # 1) If `defl[i]` is zero then it means all previous monomials
-                #    had degree `shift[i]` so we just set `defl[i]` to
-                #    `shift[i] - exp` or equivalently `gcd(0, shift[i] - exp)`.
-                # 2) If  `defl[i]` is positive then we have some monomials with
-                #    degree `shift[i]` and some with degree
-                #    `shift[i] + k * defl[i]` for some `k > 0`. We have
-                #    `gcd(shift[i] - exp, shift[i] + k1 * defl[i] - exp, shift[i] + k2 * defl[i] - exp, ...) =`
-                #    `gcd(shift[i] - exp, k1 * defl[i], k2 * defl[i], ...)`
-                #    Since `gcd(k1, k2, ...) = 1`, this is equal to
-                #    `gcd(shift[i] - exp, defl[i])`
-                defl[i] = gcd(defl[i], shift[i] - exp)
-                shift[i] = exp
-            else
-                defl[i] = gcd(defl[i], exp - shift[i])
-            end
-        end
-    end
-    @assert all(d -> d >= 0, shift)
-    @assert all(d -> d >= 0, defl)
+    shift_defl = shift_deflation.(p, variables(p))
+    shift = getindex.(shift_defl, 1)
+    defl = getindex.(shift_defl, 2)
     s = prod(variables(p).^shift; init = constantmonomial(p))::monomialtype(p)
     d = prod(variables(p).^defl; init = constantmonomial(p))::monomialtype(p)
     return s, d
@@ -340,8 +342,11 @@ function _extracted_variable(p1, p2)
 end
 
 function multivariate_gcd(p1::APL, p2::APL, var, algo, m1::MA.MutableTrait, m2::MA.MutableTrait)
-    q = univariate_gcd(isolate_variable(p1, var, m1), isolate_variable(p2, var, m2), algo, MA.IsMutable(), MA.IsMutable())
-    return sum(coefficient(t) * monomial(t) for t in terms(q))::MA.promote_operation(gcd, typeof(p1), typeof(p2))
+    q1 = isolate_variable(p1, var, m1)
+    q2 = isolate_variable(p2, var, m2)
+    q = univariate_gcd(q1, q2, algo, MA.IsMutable(), MA.IsMutable())
+    P = MA.promote_operation(gcd, typeof(p1), typeof(p2))
+    return flatten_variable!(termtype(P), q)::P
 end
 
 _vector(t::AbstractVector) = collect(t)
@@ -377,6 +382,17 @@ function isolate_variable(poly::APL, var::AbstractVariable, mutability::MA.Mutab
     return polynomial!(new_terms, SortedUniqState())
 end
 
+function flatten_variable!(::Type{TT}, poly::APL) where {TT<:AbstractTerm}
+    ts = TT[]
+    for t in terms(poly)
+        m = monomial(t)
+        for _t in terms(coefficient(t))
+            push!(ts, _t * m)
+        end
+    end
+    return polynomial!(ts, UniqState())
+end
+
 _polynomial(ts, state, ::MA.IsNotMutable) = polynomial(ts, state)
 _polynomial(ts, state, ::MA.IsMutable) = polynomial!(ts, state)
 
@@ -385,6 +401,7 @@ _polynomial(ts, state, ::MA.IsMutable) = polynomial!(ts, state)
 
 Returns the `gcd` of primitive polynomials `p` and `q` using algorithm `algo`
 which is a subtype of [`AbstractUnivariateGCDAlgorithm`](@ref).
+The function might modify `p` or `q`.
 """
 function primitive_univariate_gcd! end
 
@@ -415,12 +432,16 @@ function primitive_univariate_gcd!(p::APL, q::APL, algo::GeneralizedEuclideanAlg
         elseif isconstant(v)
             # `p` and `q` are primitive so if one of them is constant, it cannot
             # divide the content of the other one.
-            return one(R)
+            return MA.operate!(one, u)
         end
-        divided, r = pseudo_rem(u, v, algo)
-        if !divided
+
+        d_before = degree(leadingmonomial(u))
+        r = MA.operate!(rem_or_pseudo_rem, u, v, algo)
+        d_after = degree(leadingmonomial(r))
+        if d_after == d_before
             not_divided_error(u, v)
         end
+
         if !algo.primitive_rem
             r = primitive_part(r, algo, MA.IsMutable())::R
         end
@@ -500,11 +521,14 @@ function univariate_gcd(::UFD, p1::APL, p2::APL, algo::AbstractUnivariateGCDAlgo
     pp = primitive_univariate_gcd!(f1, f2, algo)
     gg = _gcd(g1, g2, algo, MA.IsMutable(), MA.IsMutable())#::MA.promote_operation(gcd, typeof(g1), typeof(g2))
     # Multiply each coefficient by the gcd of the contents.
-    return mapcoefficients!(Base.Fix1(*, gg), pp, nonzero = true)
+    if !isone(gg)
+        MA.operate!(right_constant_mult, pp, gg)
+    end
+    return pp
 end
 
 function univariate_gcd(::Field, p1::APL, p2::APL, algo::AbstractUnivariateGCDAlgorithm, m1::MA.MutableTrait, m2::MA.MutableTrait)
-    return primitive_univariate_gcd!(p1, p2, algo)
+    return primitive_univariate_gcd!(_copy(p1, m1), _copy(p2, m2), algo)
 end
 
 function univariate_gcdx(p1::APL{S}, p2::APL{T}, algo::AbstractUnivariateGCDAlgorithm) where {S,T}
@@ -568,8 +592,12 @@ Addison-Wesley Professional. Third edition.
 function content(poly::APL{T}, algo::AbstractUnivariateGCDAlgorithm, mutability::MA.MutableTrait) where {T}
     P = MA.promote_operation(gcd, T, T)
     coefs = coefficients(poly)
-    isempty(coefs) && return zero(P)
-    length(coefs) == 1 && return convert(P, _copy(first(coefs), mutability))
+    if isempty(coefs)
+        return zero(P)
+    end
+    if length(coefs) == 1
+        return convert(P, _copy(first(coefs), mutability))
+    end
     # Largely inspired from from `YingboMa/SIMDPolynomials.jl`.
     if T <: APL
         for i in eachindex(coefs)
@@ -592,7 +620,7 @@ function content(poly::APL{T}, algo::AbstractUnivariateGCDAlgorithm, mutability:
     end
     return g::P
 end
-function content(poly::APL{T}, ::AbstractUnivariateGCDAlgorithm, ::MA.MutableTrait) where {T<:AbstractFloat}
+function content(::APL{T}, ::AbstractUnivariateGCDAlgorithm, ::MA.MutableTrait) where {T<:AbstractFloat}
     return one(T)
 end
 
@@ -627,5 +655,5 @@ Addison-Wesley Professional. Third edition.
 """
 function primitive_part_content(p, algo::AbstractUnivariateGCDAlgorithm, mutability::MA.MutableTrait)
     g = content(p, algo, MA.IsNotMutable())
-    return mapcoefficients(Base.Fix2(_div, g), p, mutability; nonzero = true), g
+    return right_constant_div_multiple(p, g, mutability), g
 end
